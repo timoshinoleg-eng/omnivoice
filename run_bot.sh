@@ -12,13 +12,26 @@ export HF_TOKEN=$(age -d -i ~/.config/openclaw/secrets/age.key ~/.config/opencla
 export SUPABASE_URL="${SUPABASE_URL:-}"
 export SUPABASE_KEY="${SUPABASE_KEY:-}"
 
+# OpenAI/OpenRouter (для ML модерации) - опционально
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+# Или: export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+
 echo "✅ Токены загружены из SOPS"
 echo "🤖 Бот: @omni_voice_bot"
+echo "🎙️  HuggingFace: OmniVoice"
+
 if [ -n "$SUPABASE_URL" ]; then
-    echo "☁️  Supabase: подключено"
+    echo "☁️  Supabase: подключено (хранение голосов)"
 else
-    echo "⚠️  Supabase: не настроено (голоса будут временными)"
+    echo "⚠️  Supabase: не настроено (голоса временные ~1ч)"
 fi
+
+if [ -n "$OPENAI_API_KEY" ] || [ -n "$OPENROUTER_API_KEY" ]; then
+    echo "🧠 ML Moderation: активна"
+else
+    echo "📋 ML Moderation: keyword-based только"
+fi
+
 echo "🚀 Запуск..."
 
 # Запуск бота
