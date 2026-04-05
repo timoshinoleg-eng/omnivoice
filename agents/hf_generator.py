@@ -15,6 +15,7 @@ from .base_agent import BaseAgent, AgentResult, AgentStatus
 from ..utils.hf_api import hf_api
 from ..utils.audio_utils import estimate_audio_duration
 from ..utils.s3_storage import init_storage
+from ..utils.audio_watermarker import audio_watermarker
 from ..storage.state_manager import state_manager
 from ..config.settings import config, get_message
 
@@ -148,14 +149,21 @@ class HFGenerator(BaseAgent):
                 # Calculate actual duration (estimate)
                 actual_duration = estimate_audio_duration(text)
                 
+                # Add audio watermark
+                watermarked_audio = audio_watermarker.add_watermark(
+                    result, 
+                    method="metadata"  # Use metadata method for compatibility
+                )
+                
                 return AgentResult(
                     status=AgentStatus.SUCCESS,
-                    message="Generation successful",
+                    message="Generation successful with watermark",
                     data={
-                        'audio_data': result,
+                        'audio_data': watermarked_audio,
                         'duration': actual_duration,
                         'text': text,
-                        'job_id': job_id
+                        'job_id': job_id,
+                        'watermarked': True
                     }
                 )
             else:
