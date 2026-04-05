@@ -14,8 +14,8 @@ from pathlib import Path
 from .base_agent import BaseAgent, AgentResult, AgentStatus
 from ..utils.hf_api import hf_api
 from ..utils.audio_utils import estimate_audio_duration
-from ..utils.s3_storage import init_storage
-from ..utils.audio_watermarker import audio_watermarker
+from ..utils.storage import init_storage
+from ..utils.audio_watermarker import get_watermarker
 from ..storage.state_manager import state_manager
 from ..config.settings import config, get_message
 
@@ -150,10 +150,8 @@ class HFGenerator(BaseAgent):
                 actual_duration = estimate_audio_duration(text)
                 
                 # Add audio watermark
-                watermarked_audio = audio_watermarker.add_watermark(
-                    result, 
-                    method="metadata"  # Use metadata method for compatibility
-                )
+                watermarker = get_watermarker()
+                watermarked_audio = watermarker.add_watermark(result)
                 
                 return AgentResult(
                     status=AgentStatus.SUCCESS,
