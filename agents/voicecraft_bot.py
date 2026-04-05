@@ -18,6 +18,7 @@ from .hf_generator import hf_generator
 from .error_handler import error_handler, ErrorType
 from ..storage.state_manager import state_manager
 from ..config.settings import config, get_message
+from ..utils.audio_utils import split_text_for_chunks
 
 
 class VoiceCraftBot(BaseAgent):
@@ -45,6 +46,10 @@ class VoiceCraftBot(BaseAgent):
         
         # Start warmup routine
         self._start_warmup()
+        
+        # Start HF API warmup scheduler
+        from ..utils.hf_api import hf_api
+        hf_api.start_warmup_scheduler()
     
     def process(self, user_input: Any, user_id: str, **kwargs) -> AgentResult:
         """
@@ -108,6 +113,12 @@ class VoiceCraftBot(BaseAgent):
         
         elif intent == UserIntent.CONSENT_NO:
             return self._handle_consent(user_id, False)
+        
+        elif intent == UserIntent.CONFIRM_SPLIT:
+            return self._handle_confirm_split(user_id)
+        
+        elif intent == UserIntent.CANCEL_SPLIT:
+            return self._handle_cancel_split(user_id)
         
         elif intent == UserIntent.TEXT_INPUT:
             # Could be transcript or generate request
@@ -196,19 +207,88 @@ class VoiceCraftBot(BaseAgent):
     def _handle_transcript(self, user_id: str, transcript: str) -> AgentResult:
         """Обработать транскрипцию"""
         return voice_profile_setup.process(None, user_id, step='transcript', transcript=transcript)
+
+    def _handle_confirm_split(self, user_id: str) -> AgentResult:
+        """Обработать подтверждение разбиения текста"""
+        session = self._get_session(user_id)
+        chunks = session.get('pending_chunks', [])
+
+        if not chunks:
+            return AgentResult(
+                status=AgentStatus.ERROR,
+                message="No pending chunks",
+                response_to_user="Нет ожидающих частей для генерации."
+            )
+
+        user_state = state_manager.get_user_state(user_id)
+        voice_profile = user_state.voice_profile
+        use_demo = session.get('demo_mode', False)
+
+        # Generate all chunks
+        audio_parts = []
+        total_duration = 0
+
+        for i, chunk in enumerate(chunks):
+            gen_result = self._generate_single(user_id, chunk, voice_profile, use_demo)
+
+            if gen_result.status != AgentStatus.SUCCESS:
+                # Partial failure - return what we have
+                if audio_parts:
+                    break
+                return gen_result
+
+            audio_parts.append(gen_result.data.get('audio_data'))
+            total_duration += gen_result.data.get('duration', 0)
+
+        # Clear pending chunks
+        session.pop('pending_chunks', None)
+        session.pop('chunk_index', None)
+
+        remaining = quota_manager.get_remaining(user_id)
+
+        return AgentResult(
+            status=AgentStatus.SUCCESS,
+            message=f"Generated {len(audio_parts)} parts",
+            data={
+                'audio_data': audio_parts[0] if len(audio_parts) == 1 else audio_parts,
+                'duration': total_duration,
+                'parts': len(audio_parts),
+                'remaining': remaining
+            },
+            response_to_user=f"✅ Готово! Сгенерировано {len(audio_parts)} частей.\n"
+                            f"⏱️ Общая длительность: {total_duration:.1f}s\n"
+                            f"📉 Осталось сегодня: {remaining}/3"
+        )
+
+    def _handle_cancel_split(self, user_id: str) -> AgentResult:
+        """Обработать отмену разбиения текста"""
+        session = self._get_session(user_id)
+        session.pop('pending_chunks', None)
+        session.pop('chunk_index', None)
+
+        return AgentResult(
+            status=AgentStatus.SUCCESS,
+            message="Split cancelled",
+            response_to_user="❌ Генерация отменена. Отправьте новый текст."
+        )
     
     def _handle_generate(self, user_id: str, text: str) -> AgentResult:
-        """Обработать генерацию речи"""
+        """Обработать генерацию речи с поддержкой разбиения длинного текста"""
         # Step 1: Check quota
         quota_result = quota_manager.process(None, user_id, action='check')
         
         if quota_result.status == AgentStatus.REJECTED:
             return quota_result
         
-        # Step 2: Moderate content
+        remaining = quota_result.data.get('remaining', 0)
+        
+        # Step 2: Moderate content (length check included)
         moderation_result = content_moderator_agent.process(text, user_id)
         
         if moderation_result.status == AgentStatus.REJECTED:
+            # Check if it's a length issue that can be split
+            if moderation_result.data.get('suggested_chunks', 0) > 1:
+                return self._handle_long_text(user_id, text, remaining)
             return moderation_result
         
         sanitized_text = moderation_result.data.get('sanitized_text', text)
@@ -221,8 +301,43 @@ class VoiceCraftBot(BaseAgent):
         voice_profile = user_state.voice_profile
         
         # Step 4: Generate speech
+        return self._generate_single(user_id, sanitized_text, voice_profile, use_demo)
+    
+    def _handle_long_text(self, user_id: str, text: str, remaining_quota: int) -> AgentResult:
+        """Обработать длинный текст — разбить на части и сгенерировать"""
+        chunks = split_text_for_chunks(text, config.MAX_CHARACTERS_PER_REQUEST)
+        chunks_needed = len(chunks)
+        
+        # Check if we have enough quota
+        if chunks_needed > remaining_quota:
+            return AgentResult(
+                status=AgentStatus.REJECTED,
+                message=f"Not enough quota for {chunks_needed} chunks",
+                data={'chunks_needed': chunks_needed, 'remaining_quota': remaining_quota},
+                response_to_user=f"⚠️ Текст требует {chunks_needed} генераций, но у вас осталось {remaining_quota}/3.\n\n"
+                                f"Сократите текст или дождитесь сброса лимита завтра."
+            )
+        
+        # Ask user for confirmation
+        session = self._get_session(user_id)
+        session['pending_chunks'] = chunks
+        session['chunk_index'] = 0
+        
+        preview = chunks[0][:100] + "..." if len(chunks[0]) > 100 else chunks[0]
+        
+        return AgentResult(
+            status=AgentStatus.NEED_MORE_INFO,
+            message=f"Long text split into {chunks_needed} parts",
+            data={'chunks': chunks, 'total_chunks': chunks_needed},
+            response_to_user=f"📄 Текст разбит на {chunks_needed} частей (использует {chunks_needed} генераций из {remaining_quota}).\n\n"
+                            f"Часть 1/{chunks_needed}:\n`{preview}`\n\n"
+                            f"Отправьте **да** для генерации всех частей, или **отмена** для отмены."
+        )
+    
+    def _generate_single(self, user_id: str, text: str, voice_profile, use_demo: bool) -> AgentResult:
+        """Сгенерировать одну часть текста"""
         gen_result = hf_generator.process(
-            {'text': sanitized_text},
+            {'text': text},
             user_id,
             voice_profile=voice_profile,
             use_demo=use_demo
@@ -283,6 +398,10 @@ class VoiceCraftBot(BaseAgent):
         self._stop_warmup.set()
         if self._warmup_thread:
             self._warmup_thread.join(timeout=5)
+        
+        # Stop HF API warmup scheduler
+        from ..utils.hf_api import hf_api
+        hf_api.stop_warmup_scheduler()
     
     def get_stats(self) -> Dict[str, Any]:
         """Получить статистику бота"""

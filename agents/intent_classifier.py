@@ -24,6 +24,8 @@ class UserIntent(Enum):
     UNKNOWN = "unknown"       # Неизвестное намерение
     CONSENT_YES = "consent_yes"  # Подтверждение согласия
     CONSENT_NO = "consent_no"    # Отказ от согласия
+    CONFIRM_SPLIT = "confirm_split"  # Подтверждение разбиения текста
+    CANCEL_SPLIT = "cancel_split"    # Отмена разбиения текста
     TEXT_INPUT = "text_input"    # Просто текст (возможно транскрипция или текст для генерации)
 
 
@@ -71,6 +73,14 @@ class IntentClassifier(BaseAgent):
         ],
         UserIntent.CONSENT_NO: [
             'нет', 'no', 'отмена', 'cancel', 'не подтверждаю'
+        ],
+        UserIntent.CONFIRM_SPLIT: [
+            'да', 'yes', 'генерировать', 'go', 'подтверждаю', 
+            'ок', 'ok', 'сгенерируй', 'давай'
+        ],
+        UserIntent.CANCEL_SPLIT: [
+            'отмена', 'cancel', 'нет', 'no', 'отменить', 
+            'не надо', 'stop', 'хватит'
         ],
     }
     

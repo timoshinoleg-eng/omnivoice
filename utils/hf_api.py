@@ -7,9 +7,59 @@ Hugging Face Space API Integration
 import requests
 import uuid
 import time
-from typing import Optional, Dict, Any, Tuple
+import random
+import threading
+from typing import Optional, Dict, Any, Tuple, Callable
 from pathlib import Path
 import json
+from functools import wraps
+
+
+def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, 
+                       max_delay: float = 10.0, 
+                       retryable_exceptions: tuple = (requests.exceptions.Timeout, 
+                                                      requests.exceptions.ConnectionError)):
+    """
+    Декоратор для retry с exponential backoff
+    
+    Args:
+        max_retries: Максимальное количество попыток
+        base_delay: Базовая задержка в секундах
+        max_delay: Максимальная задержка
+        retryable_exceptions: Исключения для retry
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    last_exception = e
+                    
+                    if attempt < max_retries - 1:
+                        # Exponential backoff с jitter
+                        delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+                        time.sleep(delay)
+                    else:
+                        raise last_exception
+                except requests.exceptions.HTTPError as e:
+                    # Retry для rate limit (429) и service unavailable (503)
+                    if e.response.status_code in (429, 503):
+                        last_exception = e
+                        if attempt < max_retries - 1:
+                            delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+                            time.sleep(delay)
+                        else:
+                            raise last_exception
+                    else:
+                        raise
+            
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 class HFSpaceAPI:
@@ -25,7 +75,41 @@ class HFSpaceAPI:
         self.session.headers.update({
             'User-Agent': 'VoiceCraftBot/1.0'
         })
+        
+        # Warm-up state
+        self._warmup_timer = None
+        self._warmup_interval = 240  # 4 минуты
+        self._last_warmup = 0
     
+    def start_warmup_scheduler(self):
+        """Запустить фоновый warm-up каждые 4 минуты"""
+        self._schedule_warmup()
+    
+    def stop_warmup_scheduler(self):
+        """Остановить warm-up scheduler"""
+        if self._warmup_timer:
+            self._warmup_timer.cancel()
+            self._warmup_timer = None
+    
+    def _schedule_warmup(self):
+        """Запланировать следующий warm-up"""
+        def warmup_job():
+            try:
+                success = self.warmup()
+                self._last_warmup = time.time()
+                if success:
+                    print(f"[Warm-up] HF Space warmed up at {time.strftime('%H:%M:%S')}")
+            except Exception as e:
+                print(f"[Warm-up] Error: {e}")
+            finally:
+                # Schedule next
+                self._schedule_warmup()
+        
+        self._warmup_timer = threading.Timer(self._warmup_interval, warmup_job)
+        self._warmup_timer.daemon = True
+        self._warmup_timer.start()
+    
+    @retry_with_backoff(max_retries=3, base_delay=1.0)
     def upload_audio(self, file_path: str) -> Tuple[bool, str]:
         """
         Загрузить аудио файл на HF Space
@@ -59,6 +143,7 @@ class HFSpaceAPI:
         except Exception as e:
             return False, f"Upload error: {str(e)}"
     
+    @retry_with_backoff(max_retries=3, base_delay=2.0)
     def generate_speech(self,
                        text: str,
                        ref_audio_url: str,
