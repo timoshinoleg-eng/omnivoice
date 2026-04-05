@@ -67,7 +67,7 @@ class HFSpaceAPI:
     
     def __init__(self, space_url: str = "https://k2-fsa-omnivoice.hf.space"):
         self.space_url = space_url.rstrip('/')
-        self.predict_endpoint = f"{self.space_url}/run/predict"
+        self.predict_endpoint = f"{self.space_url}/run/_clone_fn"  # OmniVoice main endpoint
         self.upload_endpoint = f"{self.space_url}/upload"
         self.file_endpoint = f"{self.space_url}/file"
         
@@ -152,38 +152,51 @@ class HFSpaceAPI:
                        language: str = "auto",
                        timeout: int = 55) -> Tuple[bool, Any, str]:
         """
-        Сгенерировать речь через HF Space API
+        Сгенерировать речь через HF Space API (OmniVoice)
         
         Args:
             text: Текст для озвучки
             ref_audio_url: URL эталонного аудио
             ref_text: Текст эталонного аудио
             speed: Скорость речи (0.5-2.0)
-            language: Язык (auto для автоопределения)
+            language: Язык (auto/english/chinese)
             timeout: Таймаут в секундах
         
         Returns:
             (success: bool, result: Any, message: str)
-            result может быть: bytes (audio data), dict (error info), или str
         """
         session_hash = str(uuid.uuid4())
         
-        # Prepare payload for Gradio API
+        # Map language to OmniVoice format
+        lang_map = {
+            "auto": "auto",
+            "ru": "auto",  # OmniVoice auto-detects
+            "en": "english",
+            "zh": "chinese"
+        }
+        ov_language = lang_map.get(language, "auto")
+        
+        # Prepare payload for OmniVoice Gradio API
+        # Based on config: 11 inputs for _clone_fn
         payload = {
-            "fn_index": 0,  # Main predict function
             "data": [
-                text,           # user text
-                ref_audio_url,  # reference audio URL
-                ref_text,       # reference text
-                speed,          # speed
-                language        # language
-            ],
-            "session_hash": session_hash
+                text,              # [0] text to synthesize
+                None,              # [1] ref audio (file object)
+                ref_audio_url,     # [2] ref audio URL
+                ref_text,          # [3] reference text
+                ov_language,       # [4] language
+                speed,             # [5] speed
+                25,                # [6] inference steps (default)
+                2.5,               # [7] guidance scale (default)
+                None,              # [8] 
+                None,              # [9]
+                session_hash       # [10] session hash
+            ]
         }
         
         try:
             response = self.session.post(
-                self.predict_endpoint,
+                f"{self.space_url}/run/_clone_fn",
                 json=payload,
                 timeout=timeout
             )
@@ -197,20 +210,18 @@ class HFSpaceAPI:
                     return False, data, f"API Error: {data['error']}"
                 
                 # Extract audio data from response
-                # Gradio returns data in 'data' field
                 if 'data' in data and len(data['data']) > 0:
-                    result_data = data['data'][0]
+                    result_data = data['data'][0]  # First output is audio
                     
                     # Check if it's a file path/URL
                     if isinstance(result_data, str):
                         if result_data.startswith('http'):
-                            # It's a URL, download it
                             audio_response = self.session.get(result_data, timeout=30)
                             if audio_response.status_code == 200:
                                 return True, audio_response.content, "Success"
                             return False, None, f"Failed to download audio: HTTP {audio_response.status_code}"
                         else:
-                            # It might be a local path on HF server
+                            # Local path on HF server
                             file_url = f"{self.file_endpoint}={result_data}"
                             audio_response = self.session.get(file_url, timeout=30)
                             if audio_response.status_code == 200:
