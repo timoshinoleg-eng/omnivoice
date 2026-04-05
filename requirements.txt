@@ -1,0 +1,15 @@
+# VoiceCraft Bot Requirements
+# ===========================
+
+# Core dependencies
+requests>=2.28.0
+
+# Optional: For audio processing
+# ffmpeg-python>=0.2.0
+
+# Optional: For Telegram bot integration
+# python-telegram-bot>=20.0
+
+# Optional: For testing
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
