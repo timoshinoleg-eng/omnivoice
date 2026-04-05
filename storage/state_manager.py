@@ -20,14 +20,29 @@ class VoiceProfile:
     ref_text: str
     created_at: str
     expires_at: Optional[str] = None  # HF temp files expire
+    s3_url: Optional[str] = None      # Permanent S3 URL
+    s3_key: Optional[str] = None      # S3 key for refresh
     
     def is_expired(self) -> bool:
         """Проверить, не истек ли срок действия URL"""
+        # If we have S3, never expired
+        if self.s3_url:
+            return False
+        
         if self.expires_at:
             return datetime.now() > datetime.fromisoformat(self.expires_at)
+        
         # HF temp files typically expire after ~1 hour
         created = datetime.fromisoformat(self.created_at)
         return (datetime.now() - created) > timedelta(hours=1)
+    
+    def get_effective_url(self) -> str:
+        """Получить рабочий URL (S3 приоритет)"""
+        return self.s3_url or self.ref_audio_url
+    
+    def needs_refresh(self) -> bool:
+        """Проверить нужно ли обновить URL"""
+        return self.is_expired() and self.s3_key is not None
 
 
 @dataclass

@@ -1,7 +1,7 @@
 """
 Voice Profile Setup Agent
 =========================
-Агент для настройки голосового профиля пользователя
+Агент для настройки голосового профиля пользователя с S3 хранением
 """
 
 import os
@@ -14,6 +14,7 @@ from .base_agent import BaseAgent, AgentResult, AgentStatus
 from ..storage.state_manager import state_manager, VoiceProfile
 from ..utils.audio_utils import validate_audio_file, convert_to_wav
 from ..utils.hf_api import hf_api
+from ..utils.s3_storage import init_storage, voice_storage
 from ..config.settings import config, get_message
 
 
@@ -127,7 +128,7 @@ class VoiceProfileSetup(BaseAgent):
         )
     
     def _process_consent(self, user_id: str, consent: bool) -> AgentResult:
-        """Обработить подтверждение согласия"""
+        """Обработать подтверждение согласия"""
         setup_state = self._setup_states.get(user_id)
         
         if not setup_state:
@@ -158,7 +159,7 @@ class VoiceProfileSetup(BaseAgent):
         )
     
     def _process_transcript(self, user_id: str, transcript: str) -> AgentResult:
-        """Обработить транскрипцию и создать профиль"""
+        """Обработать транскрипцию и создать профиль с S3 хранением"""
         setup_state = self._setup_states.get(user_id)
         
         if not setup_state:
@@ -184,24 +185,38 @@ class VoiceProfileSetup(BaseAgent):
                 response_to_user="Ошибка: аудио файл не найден. Начните заново."
             )
         
-        # Upload audio to HF Space
-        success, result = hf_api.upload_audio(audio_path)
+        # Step 1: Upload to S3 for permanent storage
+        storage = init_storage()
+        s3_success, s3_result = storage.upload_voice_sample(user_id, audio_path)
         
-        if not success:
+        if not s3_success:
             return AgentResult(
                 status=AgentStatus.ERROR,
-                message=f"Upload failed: {result}",
-                response_to_user=f"❌ Ошибка загрузки аудио: {result}\n\nПопробуйте снова."
+                message=f"S3 upload failed: {s3_result}",
+                response_to_user=f"❌ Ошибка сохранения аудио: {s3_result}\n\nПопробуйте снова."
             )
         
-        audio_url = result
+        s3_url = s3_result
+        s3_key = storage.get_voice_sample_key_from_url(s3_url)
         
-        # Create voice profile
+        # Step 2: Also upload to HF for immediate use (with retry)
+        hf_success, hf_result = hf_api.upload_audio(audio_path)
+        
+        if not hf_success:
+            # HF upload failed, but S3 is OK - still create profile
+            print(f"[VoiceProfile] HF upload failed: {hf_result}, using S3 only")
+            hf_temp_url = None
+        else:
+            hf_temp_url = hf_result
+        
+        # Step 3: Create voice profile with both URLs
         voice_profile = VoiceProfile(
-            ref_audio_url=audio_url,
+            ref_audio_url=hf_temp_url or s3_url,  # Use HF temp if available, else S3
             ref_text=transcript.strip(),
             created_at=datetime.now().isoformat(),
-            expires_at=(datetime.now() + timedelta(hours=1)).isoformat()
+            expires_at=None,  # No expiration with S3
+            s3_url=s3_url,    # Permanent S3 URL
+            s3_key=s3_key     # S3 key for refresh
         )
         
         # Save to user state
@@ -218,13 +233,15 @@ class VoiceProfileSetup(BaseAgent):
         
         return AgentResult(
             status=AgentStatus.SUCCESS,
-            message="Voice profile created successfully",
+            message="Voice profile created successfully with S3 backup",
             data={
-                'audio_url': audio_url,
+                's3_url': s3_url,
+                's3_key': s3_key,
+                'hf_url': hf_temp_url,
                 'transcript': transcript.strip(),
                 'duration': setup_state.get('audio_duration')
             },
-            response_to_user=get_message('voice_profile_created')
+            response_to_user=get_message('voice_profile_created') + "\n\n💾 Голос сохранён в облаке (7 дней доступности)."
         )
     
     def _reset_profile(self, user_id: str) -> AgentResult:

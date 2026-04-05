@@ -14,6 +14,7 @@ from pathlib import Path
 from .base_agent import BaseAgent, AgentResult, AgentStatus
 from ..utils.hf_api import hf_api
 from ..utils.audio_utils import estimate_audio_duration
+from ..utils.s3_storage import init_storage
 from ..storage.state_manager import state_manager
 from ..config.settings import config, get_message
 
@@ -86,11 +87,25 @@ class HFGenerator(BaseAgent):
         
         # Check if voice profile expired
         if hasattr(voice_profile, 'is_expired') and voice_profile.is_expired():
-            return AgentResult(
-                status=AgentStatus.ERROR,
-                message="Voice profile expired",
-                response_to_user=get_message('voice_profile_expired')
-            )
+            # Try to refresh from S3 if available
+            if hasattr(voice_profile, 's3_key') and voice_profile.s3_key:
+                storage = init_storage()
+                refreshed, new_url = storage.refresh_presigned_url(voice_profile.s3_key)
+                if refreshed:
+                    voice_profile.s3_url = new_url
+                    voice_profile.ref_audio_url = new_url
+                else:
+                    return AgentResult(
+                        status=AgentStatus.ERROR,
+                        message="Voice profile expired and refresh failed",
+                        response_to_user=get_message('voice_profile_expired')
+                    )
+            else:
+                return AgentResult(
+                    status=AgentStatus.ERROR,
+                    message="Voice profile expired",
+                    response_to_user=get_message('voice_profile_expired')
+                )
         
         # Start generation
         job_id = f"{user_id}_{int(time.time())}"
