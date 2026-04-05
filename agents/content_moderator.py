@@ -2,11 +2,13 @@
 Content Moderator Agent
 =======================
 Агент для проверки контента перед генерацией
+Использует ML модерацию (OpenAI API) с fallback на keyword-based
 """
 
 from typing import Optional, List, Any
 
 from .base_agent import BaseAgent, AgentResult, AgentStatus
+from ..utils.ml_moderator import ml_moderator
 from ..utils.content_moderator import content_moderator
 from ..config.settings import config, get_message
 
@@ -14,7 +16,7 @@ from ..config.settings import config, get_message
 class ContentModeratorAgent(BaseAgent):
     """
     Агент модерации контента
-    Проверяет текст на запрещенные слова, длину и другие ограничения
+    Проверяет текст на запрещенный контент через ML API
     """
     
     def __init__(self):
@@ -76,8 +78,8 @@ class ContentModeratorAgent(BaseAgent):
                 next_action='split_text'
             )
         
-        # Check for blocked content
-        is_safe, violations = content_moderator.check_text(text)
+        # Check for blocked content via ML
+        is_safe, violations, details = ml_moderator.check_text(text)
         
         if not is_safe:
             return AgentResult(
@@ -85,7 +87,8 @@ class ContentModeratorAgent(BaseAgent):
                 message=f"Content blocked: {', '.join(violations)}",
                 data={
                     'violations': violations,
-                    'length': length
+                    'length': length,
+                    'ml_details': details
                 },
                 response_to_user=get_message('content_blocked')
             )
@@ -124,19 +127,19 @@ class ContentModeratorAgent(BaseAgent):
     
     def _check_safety_only(self, text: str) -> AgentResult:
         """Проверить только безопасность контента"""
-        is_safe, violations = content_moderator.check_text(text)
+        is_safe, violations, details = ml_moderator.check_text(text)
         
         if is_safe:
             return AgentResult(
                 status=AgentStatus.SUCCESS,
                 message="Content is safe",
-                data={'is_safe': True}
+                data={'is_safe': True, 'ml_details': details}
             )
         else:
             return AgentResult(
                 status=AgentStatus.REJECTED,
                 message=f"Unsafe content: {', '.join(violations)}",
-                data={'is_safe': False, 'violations': violations}
+                data={'is_safe': False, 'violations': violations, 'ml_details': details}
             )
     
     def quick_check(self, text: str) -> bool:
@@ -147,7 +150,7 @@ class ContentModeratorAgent(BaseAgent):
         if not is_valid_length:
             return False
         
-        is_safe, _ = content_moderator.check_text(text)
+        is_safe, _, _ = ml_moderator.check_text(text)
         return is_safe
     
     def split_long_text(self, text: str, max_length: int = None) -> List[str]:
