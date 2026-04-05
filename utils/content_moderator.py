@@ -2,10 +2,14 @@
 Content Moderation Module
 =========================
 Проверка текста на запрещенный контент
+- Keyword-based (fast, local)
+- ML-based (OpenAI Moderation API)
 """
 
 import re
 from typing import Tuple, List
+
+from .ml_moderator import get_ml_moderator
 
 
 class ContentModerator:
@@ -82,10 +86,13 @@ class ContentModerator:
     
     def __init__(self):
         self.compiled_patterns = [re.compile(p, re.IGNORECASE) for p in self.SUSPICIOUS_PATTERNS]
+        self.ml_moderator = get_ml_moderator()
     
     def check_text(self, text: str) -> Tuple[bool, List[str]]:
         """
         Проверить текст на запрещенный контент
+        - Сначала keyword-based (быстро)
+        - Затем ML-based (если API доступен)
         
         Args:
             text: Текст для проверки
@@ -111,6 +118,18 @@ class ContentModerator:
             matches = pattern.findall(text)
             if matches:
                 violations.append(f"Подозрительный паттерн обнаружен")
+        
+        # ML-based moderation (additional layer)
+        try:
+            ml_safe, ml_categories = self.ml_moderator.moderate_text(text)
+            if not ml_safe:
+                violations.append(f"ML модерация: {', '.join(ml_categories[:3])}")
+        except Exception as e:
+            # ML failed, continue with keyword results only
+            pass
+        
+        is_safe = len(violations) == 0
+        return is_safe, violations
         
         # Check character limit
         if len(text) > 1000:

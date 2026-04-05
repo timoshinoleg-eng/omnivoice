@@ -1,30 +1,28 @@
 """
-ML Content Moderation
-=====================
-Модерация контента через OpenAI Moderation API
-Заменяет keyword-based на нейросетевую классификацию
+ML Content Moderation (OpenAI)
+===============================
+Замена keyword-based модерации на ML-модель OpenAI
 """
 
 import os
 import requests
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List
 
 
-class MLContentModerator:
+class MLModerator:
     """
-    ML-based модератор контента через OpenAI API
+    ML модератор контента через OpenAI Moderation API
     """
     
     def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.getenv('OPENAI_API_KEY') or os.getenv('KIMI_API_KEY')
-        self.endpoint = "https://api.openai.com/v1/moderations"
+        self.api_key = api_key or os.getenv('OPENAI_API_KEY') or os.getenv('OPENROUTER_API_KEY')
+        self.base_url = "https://api.openai.com/v1"
         
-        # Fallback to Kimi if no OpenAI key
-        if not self.api_key and os.getenv('KIMI_API_KEY'):
-            self.endpoint = "https://api.moonshot.cn/v1/moderations"
-            self.api_key = os.getenv('KIMI_API_KEY')
+        # If using OpenRouter
+        if os.getenv('OPENROUTER_API_KEY'):
+            self.base_url = "https://openrouter.ai/api/v1"
     
-    def check_text(self, text: str) -> Tuple[bool, List[str], Dict[str, Any]]:
+    def moderate_text(self, text: str) -> Tuple[bool, List[str]]:
         """
         Проверить текст через ML модерацию
         
@@ -32,86 +30,128 @@ class MLContentModerator:
             text: Текст для проверки
             
         Returns:
-            (is_safe: bool, violations: list, details: dict)
+            (is_safe: bool, categories: list of flagged categories)
         """
         if not self.api_key:
-            # Fallback to keyword-based if no API key
-            return self._keyword_fallback(text)
+            # Fallback: skip ML moderation
+            return True, []
         
         try:
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+            
+            if 'openrouter' in self.base_url:
+                # OpenRouter doesn't have moderation endpoint, use completion
+                return self._moderate_via_openrouter(text)
+            
+            # OpenAI Moderation API
             response = requests.post(
-                self.endpoint,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={"input": text},
+                f"{self.base_url}/moderations",
+                headers=headers,
+                json={'input': text},
                 timeout=10
             )
             
-            if response.status_code != 200:
-                print(f"[ML Moderation] API error: {response.status_code}")
-                return self._keyword_fallback(text)
+            if response.status_code == 200:
+                result = response.json()
+                
+                if 'results' in result and len(result['results']) > 0:
+                    moderation = result['results'][0]
+                    flagged = moderation.get('flagged', False)
+                    categories = moderation.get('categories', {})
+                    
+                    # Get list of flagged categories
+                    flagged_categories = [
+                        cat for cat, is_flagged in categories.items() 
+                        if is_flagged
+                    ]
+                    
+                    # Block if flagged for severe categories
+                    severe_categories = [
+                        'sexual', 'hate', 'violence', 'self-harm',
+                        'sexual/minors', 'hate/threatening', 'violence/graphic'
+                    ]
+                    
+                    is_safe = not any(cat in flagged_categories for cat in severe_categories)
+                    
+                    return is_safe, flagged_categories
+                
+                return True, []
+            else:
+                print(f"[MLModerator] API error: {response.status_code}")
+                # Fail open - allow if API fails
+                return True, []
+                
+        except Exception as e:
+            print(f"[MLModerator] Error: {e}")
+            # Fail open
+            return True, []
+    
+    def _moderate_via_openrouter(self, text: str) -> Tuple[bool, List[str]]:
+        """
+        Fallback модерация через OpenRouter completion API
+        """
+        try:
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://voicecraft.bot',
+                'X-Title': 'VoiceCraft Bot'
+            }
             
-            data = response.json()
+            prompt = f"""Analyze this text for inappropriate content. Respond with ONLY a JSON object:
+{{
+  "flagged": true/false,
+  "categories": ["category1", "category2"]
+}}
+
+Categories to check: hate, sexual, violence, self-harm, harassment
+
+Text to analyze: \"{text[:500]}\"
+
+Response:"""
             
-            # Check results
-            if 'results' in data and len(data['results']) > 0:
-                result = data['results'][0]
-                
-                # Check if flagged
-                if result.get('flagged', False):
-                    # Get categories
-                    categories = result.get('categories', {})
-                    scores = result.get('category_scores', {})
-                    
-                    violations = []
-                    details = {'scores': scores, 'categories': categories}
-                    
-                    # Map OpenAI categories to our violations
-                    category_map = {
-                        'sexual': 'NSFW/сексуальный контент',
-                        'hate': 'разжигание ненависти',
-                        'harassment': 'домогательства',
-                        'self-harm': 'самоповреждение',
-                        'sexual/minors': 'контент с участием несовершеннолетних',
-                        'hate/threatening': 'угрозы',
-                        'violence': 'насилие',
-                        'violence/graphic': 'графическое насилие'
-                    }
-                    
-                    for cat, flagged in categories.items():
-                        if flagged:
-                            violations.append(category_map.get(cat, cat))
-                    
-                    return False, violations, details
-                
-                # Check scores even if not flagged (high confidence)
-                scores = result.get('category_scores', {})
-                high_risk = []
-                
-                for cat, score in scores.items():
-                    if score > 0.8:  # High confidence threshold
-                        high_risk.append(cat)
-                
-                if high_risk:
-                    violations = [f"{cat} (score: {scores[cat]:.2f})" for cat in high_risk]
-                    return False, violations, {'scores': scores}
-                
-                return True, [], {'scores': scores}
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json={
+                    'model': 'openai/gpt-3.5-turbo',
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0.1,
+                    'max_tokens': 100
+                },
+                timeout=10
+            )
             
-            return True, [], {}
+            if response.status_code == 200:
+                result = response.json()
+                content = result['choices'][0]['message']['content']
+                
+                # Parse JSON response
+                import json
+                try:
+                    moderation = json.loads(content)
+                    flagged = moderation.get('flagged', False)
+                    categories = moderation.get('categories', [])
+                    return not flagged, categories
+                except:
+                    return True, []
+            
+            return True, []
             
         except Exception as e:
-            print(f"[ML Moderation] Error: {e}")
-            return self._keyword_fallback(text)
-    
-    def _keyword_fallback(self, text: str) -> Tuple[bool, List[str], Dict[str, Any]]:
-        """Fallback на keyword-based модерацию"""
-        from ..utils.content_moderator import content_moderator
-        is_safe, violations = content_moderator.check_text(text)
-        return is_safe, violations, {'fallback': True}
+            print(f"[MLModerator] OpenRouter error: {e}")
+            return True, []
 
 
 # Global instance
-ml_moderator = MLContentModerator()
+_ml_moderator = None
+
+def get_ml_moderator() -> MLModerator:
+    """Получить глобальный экземпляр MLModerator"""
+    global _ml_moderator
+    if _ml_moderator is None:
+        _ml_moderator = MLModerator()
+    return _ml_moderator
