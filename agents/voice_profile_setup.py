@@ -14,7 +14,7 @@ from .base_agent import BaseAgent, AgentResult, AgentStatus
 from ..storage.state_manager import state_manager, VoiceProfile
 from ..utils.audio_utils import validate_audio_file, convert_to_wav
 from ..utils.hf_api import hf_api
-from ..utils.s3_storage import init_storage, voice_storage
+from ..utils.storage import init_storage
 from ..config.settings import config, get_message
 
 
@@ -159,7 +159,7 @@ class VoiceProfileSetup(BaseAgent):
         )
     
     def _process_transcript(self, user_id: str, transcript: str) -> AgentResult:
-        """Обработать транскрипцию и создать профиль с S3 хранением"""
+        """Обработать транскрипцию и создать профиль с облачным хранением"""
         setup_state = self._setup_states.get(user_id)
         
         if not setup_state:
@@ -185,38 +185,43 @@ class VoiceProfileSetup(BaseAgent):
                 response_to_user="Ошибка: аудио файл не найден. Начните заново."
             )
         
-        # Step 1: Upload to S3 for permanent storage
+        # Step 1: Upload to Supabase for permanent storage
         storage = init_storage()
-        s3_success, s3_result = storage.upload_voice_sample(user_id, audio_path)
+        storage_success, storage_result = storage.upload_voice_sample(user_id, audio_path)
         
-        if not s3_success:
-            return AgentResult(
-                status=AgentStatus.ERROR,
-                message=f"S3 upload failed: {s3_result}",
-                response_to_user=f"❌ Ошибка сохранения аудио: {s3_result}\n\nПопробуйте снова."
-            )
+        if not storage_success:
+            # Continue without permanent storage - use HF only
+            print(f"[VoiceProfile] Storage upload failed: {storage_result}")
+            permanent_url = None
+            storage_path = None
+        else:
+            permanent_url = storage_result
+            storage_path = storage.get_storage_path_from_url(storage_result) if hasattr(storage, 'get_storage_path_from_url') else None
         
-        s3_url = s3_result
-        s3_key = storage.get_voice_sample_key_from_url(s3_url)
-        
-        # Step 2: Also upload to HF for immediate use (with retry)
+        # Step 2: Upload to HF for immediate use (with retry)
         hf_success, hf_result = hf_api.upload_audio(audio_path)
         
         if not hf_success:
-            # HF upload failed, but S3 is OK - still create profile
-            print(f"[VoiceProfile] HF upload failed: {hf_result}, using S3 only")
+            if not permanent_url:
+                return AgentResult(
+                    status=AgentStatus.ERROR,
+                    message=f"All uploads failed: {hf_result}",
+                    response_to_user=f"❌ Ошибка загрузки аудио: {hf_result}\n\nПопробуйте снова."
+                )
+            # HF failed but storage OK
+            print(f"[VoiceProfile] HF upload failed: {hf_result}, using permanent storage")
             hf_temp_url = None
         else:
             hf_temp_url = hf_result
         
-        # Step 3: Create voice profile with both URLs
+        # Step 3: Create voice profile with available URLs
         voice_profile = VoiceProfile(
-            ref_audio_url=hf_temp_url or s3_url,  # Use HF temp if available, else S3
+            ref_audio_url=hf_temp_url or permanent_url,  # Use HF temp if available, else permanent
             ref_text=transcript.strip(),
             created_at=datetime.now().isoformat(),
-            expires_at=None,  # No expiration with S3
-            s3_url=s3_url,    # Permanent S3 URL
-            s3_key=s3_key     # S3 key for refresh
+            expires_at=None if permanent_url else (datetime.now() + timedelta(hours=1)).isoformat(),
+            s3_url=permanent_url,     # Permanent storage URL (Supabase or S3)
+            s3_key=storage_path       # Storage path for management
         )
         
         # Save to user state
@@ -231,17 +236,19 @@ class VoiceProfileSetup(BaseAgent):
         except:
             pass
         
+        storage_msg = "\n\n💾 Голос сохранён в облаке." if permanent_url else ""
+        
         return AgentResult(
             status=AgentStatus.SUCCESS,
-            message="Voice profile created successfully with S3 backup",
+            message="Voice profile created successfully" + (" with cloud backup" if permanent_url else ""),
             data={
-                's3_url': s3_url,
-                's3_key': s3_key,
+                'storage_url': permanent_url,
+                'storage_path': storage_path,
                 'hf_url': hf_temp_url,
                 'transcript': transcript.strip(),
                 'duration': setup_state.get('audio_duration')
             },
-            response_to_user=get_message('voice_profile_created') + "\n\n💾 Голос сохранён в облаке (7 дней доступности)."
+            response_to_user=get_message('voice_profile_created') + storage_msg
         )
     
     def _reset_profile(self, user_id: str) -> AgentResult:
